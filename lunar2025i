@@ -1,0 +1,642 @@
+import bpy        # Blender version 4.3.0
+import math
+import re
+import numpy as np   # did not import os nor csv, nor using   from itertools import zip_longest
+
+C = bpy.context; D = bpy.data
+        
+# three as yet unused functions moved to end of script dealing with orientation 
+# and creating a 3D matrix representing potential block and sphere positions
+# with numpy matrix operations to place blocks in translated and rotated positions
+
+# CLEAN SCENE everything, bar 'moon' is deleted, 
+# recreated, assigned a position, assigned a material
+ 
+
+
+# delete and create two materials, ignore 'moon', the material of the moon model
+MatList = ['BlockAcrylic', 'SphereSteel']
+for Mat in D.materials:
+    if Mat.name in MatList:
+        D.materials.remove(Mat)
+        
+BlockAcrylic = D.materials.new(name = "BlockAcrylic")   
+BlockAcrylic.use_nodes = True  
+nodes = BlockAcrylic.node_tree.nodes
+for node in nodes:
+    nodes.remove(node)              # clear all nodes to start clean
+links = BlockAcrylic.node_tree.links     # glass BSDF etc require nodes
+links.clear()                       # was   nodes.clear()
+output_node = nodes.new(type='ShaderNodeOutputMaterial')   # Create necessary nodes 
+glass_bsdf = nodes.new(type='ShaderNodeBsdfGlass') 
+transparent_bsdf = nodes.new(type='ShaderNodeBsdfTransparent') 
+mix_shader = nodes.new(type='ShaderNodeMixShader') 
+links.new(glass_bsdf.outputs['BSDF'], mix_shader.inputs[1])   # Link nodes 
+links.new(transparent_bsdf.outputs['BSDF'], mix_shader.inputs[2])
+links.new(mix_shader.outputs['Shader'], output_node.inputs['Surface'])
+mix_shader.inputs['Fac'].default_value = 0.1       # Adjust transparency level 
+glass_bsdf.inputs['IOR'].default_value = 1.5       # Set index of refraction
+    
+SphereSteel = D.materials.new(name = 'SphereSteel')       # create second material
+SphereSteel.use_nodes = True
+SphereSteel.node_tree.nodes['Principled BSDF'].inputs[0].default_value = (0.262, 0.262, 0.262, 1)    # base colour HSVA
+SphereSteel.node_tree.nodes['Principled BSDF'].inputs[3].default_value = 0.457 # was (0.457, 0.457, 0.457, 1)    # base colour subsurface
+SphereSteel.node_tree.nodes['Principled BSDF'].inputs[4].default_value = 0.96    # metallic
+SphereSteel.node_tree.nodes['Principled BSDF'].inputs[7].default_value = 0.05   # roughness 
+
+# 
+print('Check both materials (not the moon) are created:', end = ' ')
+for MatCheck in D.materials:
+    print(MatCheck.name, end = ' ')
+
+scene = C.scene                 # increase light ray bounces to benefit transparent acrylic
+scene.render.engine = 'CYCLES'
+scene.cycles.transparent_max_bounces = 20
+scene.cycles.transmission_max_bounces = 20
+scene.cycles.diffusion_bounces = 20
+scene.cycles.volume_bounces = 8
+
+
+# Dictionary of sin & cos pair values of radians for camera and other paths.  628 ~= 2 * Pi * 100
+AngleDict628 = {}
+for RadianX100 in range(629):
+    AngleDict628[RadianX100] = ( math.sin(RadianX100/100), math.cos(RadianX100/100) )
+
+print('\n AngleDict628[314] is ', AngleDict628[314])
+
+# Clean scene by removing all objects keeping only objects 'moon' (and material 'moon')
+
+for Ob in D.objects:
+    if Ob.name != 'moon':
+        D.objects.remove(Ob, do_unlink = True)
+
+
+CoCamera = ['SpinCamera']
+CoLightsList = ['LightB', 'LightA', 'Sun']       # capitalised Sun
+MadeMaterialsList = ['BlockAcrylic', 'SphereSteel']  # not used yet
+CoSpheresList = ['S111av', 'S111aw', 'S111ax', 'S111ay', 'S111az', 'S111bv', \
+    'S111bw', 'S111bx', 'S111by', 'S111bz', 'S111cv', 'S111cw', 'S111cx', \
+    'S111cy', 'S111cz', 'S111dv', 'S111dw', 'S111dx', 'S111dy', 'S111dz']
+CoBlocksList = ['B221av', 'B221aw', 'B221ax', 'B221ay', \
+    'B221az', 'B221bv', 'B221bw', 'B221bx', 'B221by', 'B221bz', 'B221cv', \
+    'B221cw', 'B221cx', 'B221cy', 'B221cz', 'B221dv', 'B221dw', 'B221dx', \
+    'B221dy', 'B221dz', 'B221ev', 'B221ew', 'B221ex', 'B221ey', 'B221ez', \
+    'B221fv', 'B221fw', 'B221fx', 'B221fy', 'B221fz', 'B321av', 'B321aw', \
+    'B321ax', 'B321ay', 'B321az', 'B321bv', 'B321bw', 'B321bx', 'B321by', \
+    'B321bz', 'B321cv', 'B321cw', 'B321cx', 'B321cy', 'B321cz', 'B321dv', \
+    'B321dw', 'B321dx', 'B321dy', 'B321dz', 'B321ev', 'B321ew', 'B321ex', \
+    'B321ey', 'B321ez', 'B321fv', 'B321fw', 'B321fx', 'B321fy', 'B321fz',]
+    
+CoOddList = ['TestCubeA', 'Sphere', 'Cube']
+TheMoon = ['moon']  ## The only item that is not detected and renewed.
+
+RenewCo = ['CoBlocks', 'CoCamera', 'CoLights', 'MadeMaterials', \
+            'CoSpheres', 'CoOdd']
+
+for MayCreate in RenewCo:
+    if MayCreate in D.collections:
+        print(MayCreate, 'already exists.', end = ' ')
+    else:
+        MayCreate = D.collections.new(MayCreate)
+        C.scene.collection.children.link(MayCreate)
+        print(MayCreate, 'created.', end = ' ')
+        
+print('\n')
+
+
+# create blocks, spheres, their glitches and names 
+# define components' names and sizes, create matrix
+Pi = math.pi;  FibSeq = [0, 1]
+while len(FibSeq) < 20:
+    FibSeq.append(FibSeq[-1] + FibSeq[-2])   # FibSeq[0] = 0, Fib[19] = 4181, Fibonacci Sequence
+
+mD = 4; mx = 0;  my = 0;  mz = 0
+BlockRoots = ['B321', 'B221']; BaseSphere = ['S111']                       # foreshadowing matrices
+BlockSuffixes = ['a', 'b', 'c', 'd', 'e', 'f']
+SphereSuffixes = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'];  SphereSuffixes = SphereSuffixes[:mD]
+Glitches = ['v', 'w', 'x', 'y', 'z'];  Offsets = [0, 0.2, -0.2, 0.5, -0.5]  # may reduce glitches 
+BScale = 10 # was 4, blocks are now measured in 'scale', distances from centre to block faces    
+FibPosB321 = 5;  FibPosB221 = 5;  FibPosS111 = 6
+PuzzlePieces = BlockRoots + BaseSphere
+GlitchDict = {}  
+FlyFrame = 1
+
+# create GlitchDict, the dictionary of glitching pieces that produces
+# 'B221f': ['B221fv', 'B221fw', 'B221fx', 'B221fy', 'B221fz'] to 'S111d': [..., 'S111dy','S111dz'] etc
+for Form in BlockRoots:
+    for BGroup in BlockSuffixes:
+        GlitchGroup = Form + BGroup
+        GlitchMembers = []
+        for GLabel in Glitches:
+            GlitchMembers.append(GlitchGroup + GLabel)
+        GlitchDict[GlitchGroup] = GlitchMembers
+for SGroup in SphereSuffixes:
+    GlitchGroup = 'S111' + SGroup
+    GlitchMembers = []
+    for GLabel in Glitches:
+        GlitchMembers.append(GlitchGroup + GLabel)
+    GlitchDict[GlitchGroup] = GlitchMembers
+print('\n Check GlitchDict:', GlitchDict)
+
+''' if PieceName not in RefreshCoName.objects:              # could link block to collection 
+        PieceName = C.scene.objects.get('PieceName')        # but 'None' type was not acceptable
+        print('Problem PieceName:', PieceName)
+        RefreshCoName.objects.link(PieceName)                         
+        print(' - added to', RefreshCoName.name)
+    
+    # DVO <- Dictionary Value and Offset, piece names and location, size and angle glitches
+    # DVO iterates through GlitchDict values (objects), Offsets (location and angle)
+    # DVO is for clusters formed of ...av, ...aw, ....ax, ....ay, ....az; not distinct positions                  
+    # rearrange for DVO to increment in the following smaller loops
+    #
+    # if ... elif ... else '''
+
+for GKey in GlitchDict.keys():
+    print('\n', GKey, end = ':\n')
+    for DVO in range(5):
+        PieceName = GlitchDict[GKey][DVO]
+        print('PieceName   # # # # line 157', PieceName, end = ' ')
+        if PieceName not in D.objects:                      # create missing block, or sphere 11 lines down
+            
+            if PieceName[:1] == 'B':
+                bpy.ops.mesh.primitive_cube_add()
+                C.object.name = PieceName
+                D.objects[PieceName].scale = (int(PieceName[1:2]) * BScale + Offsets[DVO]), \
+                            int(PieceName[2:3]) * BScale, (int(PieceName[3:4]) * BScale - Offsets[DVO])
+                RefreshMat = D.materials.get('BlockAcrylic')
+                D.objects[PieceName].active_material = RefreshMat                
+                print('\n Added missing piece', PieceName, 'with material', RefreshMat.name) 
+                if D.objects[PieceName].name not in CoBlocksList: # D.collections['CoBlocks']:   # repeats line 158
+                    D.collections['CoBlocks'].objects.link(D.objects[PieceName])    # check collection
+            
+            elif PieceName[:1] == 'S':
+                bpy.ops.mesh.primitive_uv_sphere_add(segments = 128, ring_count = 32, radius = BScale)
+                C.object.name = PieceName
+                RefreshMat = D.materials.get('BlockAcrylic')    
+                if PieceName[-1:] == 'v':                   # one in five spheres is steel not acrylic
+                    RefreshMat = D.materials.get('SphereSteel')
+                D.objects[PieceName].active_material = RefreshMat
+                print('\n Added missing piece', PieceName, 'with material', RefreshMat.name)   
+                if D.objects[PieceName].name not in CoSpheresList:
+                    D.collections['CoSpheres'].objects.link(D.objects[PieceName])  # check collection                                                            
+            else:
+                print('Piece', PieceName, 'has not been placed in CoBlocks or CoSpheres')
+                
+                                    
+        if PieceName[:4] == 'B321':
+            print('PieceName   # # # # line 187', PieceName, end = ' ')
+            D.objects[PieceName].location = \
+                (-40 + 10 * FibSeq[FibPosB321] + Offsets[DVO], 50 + Offsets[DVO], 80 + Offsets[DVO])
+            print(PieceName, 'position', -40 + 10 * FibSeq[FibPosB321] + Offsets[DVO], 50 + Offsets[DVO], 80 + Offsets[DVO])
+            #print('pos x value', 10 * FibSeq[FibPosB321] + Offsets[DVO], end = ' ')
+            #print('size alteration', Offsets[DVO], ',  rotation', Offsets[DVO], \
+            #        ' displacement', Offsets[DVO] )
+            D.objects[PieceName].rotation_euler = \
+                        (Offsets[DVO] * 2, 0, Offsets[DVO] * -0.2)
+               
+        if PieceName[:4] == 'B221':
+            #print(PieceName, Offsets[DVO], FibSeq[FibPosB221 + DVO], end = ' ')
+            #print('BRot', Offsets[DVO] * 0.05)
+            #print('PosY', 23 * FibSeq[FibPosB221], end = ' ')
+            D.objects[PieceName].location = \
+                (20 + Offsets[DVO], 23 * FibSeq[FibPosB221] + Offsets[DVO], \
+                    140 + Offsets[DVO])
+            print(PieceName, 'position', 20 + Offsets[DVO], 23 * FibSeq[FibPosB221] + Offsets[DVO], \
+                    140 + Offsets[DVO])        
+            D.objects[PieceName].rotation_euler = \
+                        (Offsets[DVO] * 0.03, 0, Offsets[DVO] * -0.02)
+            
+        if PieceName[:1] == 'S':
+            PosCentre = [FibSeq[FibPosS111] * BScale + Offsets[DVO], \
+                    0 + Offsets[DVO], FibSeq[FibPosS111] * BScale + Offsets[DVO] + 180]
+            #print(PieceName, 'PosCentre =', PosCentre)
+            #print('PosZ', 1 * FibSeq[DVO], end = ' ')
+            #print(PieceName, Offsets[DVO], FibSeq[FibPosS111 + DVO], end = ' ')
+            D.objects[PieceName].location = \
+                        (20 + Offsets[DVO], 23 * FibSeq[DVO] + Offsets[DVO], 180 + Offsets[DVO])
+            print(PieceName, 'position', FibSeq[FibPosS111] * BScale + Offsets[DVO], \
+                    0 + Offsets[DVO], FibSeq[FibPosS111] * BScale + Offsets[DVO] + 180)
+            #D.objects[PieceName].sphere_radius = BScale # repeat in the event of dimension alterations
+            SphereScale = BScale + Offsets[DVO]
+            D.objects[PieceName].scale = (SphereScale, SphereScale - Offsets[DVO], \
+                        SphereScale + Offsets[DVO])
+        
+        else:
+            print('Unrecognised piece') 
+    
+    print('\n PieceName[:4] is ', PieceName[:4])
+    if PieceName[:4] == 'B321':
+        FibPosB321 += 1
+    elif PieceName[:4] == 'B221':
+        FibPosB221 += 1
+    else:
+        FibPosS111 += 1
+    
+    print('\n Fibonacci values (B321xx, B221xx, S111xx) are ', FibSeq[FibPosB321], FibSeq[FibPosB221], FibSeq[FibPosS111])
+
+CheckSuffix = re.compile(r'\.\d{3}$')  # ready to delete Light.00# errors
+'''# Position camera # it is set up in line ~350
+bpy.ops.object.camera_add(location = (300, 30, 420))  # was (0, 10, 20)
+Camera = C.object # was = bpy.context.active_object
+C.scene.camera = Camera '''
+        
+# create lights for scene, the moon model comes with a sun
+
+LiveLayer = C.view_layer   # is this really needed?
+LightsInScene = []
+for Lum in list(D.lights):
+    LightsInScene.append(Lum.name)
+    if Lum.name not in CoLightsList:
+        print('Deleting', Lum.name)
+        D.objects[Lum.name].select = True
+        D.objects.remove(D.objects[Lum.name], do_unlink = True)
+        
+for LName in CoLightsList:      # 'official' list CoLightsList = ['LightA', 'LightB']
+    if LName not in LightsInScene:
+        LightData = D.lights.new(name = LName, type = 'POINT')
+        LightData.energy = 90 # was 30
+        LName = D.objects.new(name = LName, object_data = LightData )
+        
+        LiveLayer = C.view_layer
+        if LName == 'LightA':
+            LightA.location = ( -250, -30, 380)
+            LiveLayer.objects.active = LightA
+        if LName == 'LightB':
+            LightB.location = ( 250, 12, 380)
+            LiveLayer.objects.active = LightB
+            
+'''        
+LiveLayer = C.view_layer # what is this line from?
+LightData = D.lights.new(name = 'LightA', type = 'POINT')
+LightData.energy = 90 # was 30
+LightA = D.objects.new(name = 'LightA', object_data = LightData )
+
+LightData = D.lights.new(name = 'LightB', type = 'POINT')
+LightData.energy = 90 # was 30
+LightB = D.objects.new( name = 'LightB', object_data = LightData )
+
+#LiveLayer.active_layer_collection.collection.objects.link(LightA)
+LightA.location = ( -250, -30, 380)
+LightA.select_set( True )
+LiveLayer.objects.active = LightA
+
+#LiveLayer.active_layer_collection.collection.objects.link(LightB)
+LightB.location = ( 250, 12, 380)
+LightB.select_set( True )
+LiveLayer.objects.active = LightB
+'''
+
+
+
+for Lum in list(D.lights):
+    if Lum.name not in CoLightsList:
+        D.lights.remove(D.lights[Lum.name], do_unlink = True)
+print('\n Light list:', end = ' ')
+for Lum in list(D.lights):
+    print(Lum.name, end = ' ')
+
+
+'''        
+may get rid of this if it is deleting objects >
+        
+# Clean up.  Delete .00# suffixes for objects, materials and display removal lists
+ObjectsRemoved = [];  ObjectsInScene = []; CamerasRemoved = []; CamerasInScene = []
+MaterialsRemoved = []; MaterialsInScene = []
+      # regex identifying suffixes .001, .002 etc 
+for Ob in D.objects:
+    if CheckSuffix.search(Ob.name):
+        ObjectsRemoved.append(Ob.name)
+        D.objects.remove(Ob, do_unlink = True)
+    else:
+        ObjectsInScene.append(Ob.name)
+for Mat in D.materials:
+    if CheckSuffix.search(Mat.name):
+        MaterialsRemoved.append(Mat.name)
+        D.materials.remove(Mat, do_unlink = True)
+    else:
+        MaterialsInScene.append(Mat.name)
+for Cam in D.cameras:
+    if CheckSuffix.search(Cam.name):
+        CamerasRemoved.append(Cam.name)
+        D.cameras.remove(Cam, do_unlink = True)
+    else:
+        CamerasInScene.append(Cam.name)    
+    
+print('\n', len(ObjectsRemoved), 'ObjectsRemoved and', len(MaterialsRemoved), 'MaterialsRemoved')
+print('ObjectsRemoved:', ObjectsRemoved, '\n MaterialsRemoved:', MaterialsRemoved)
+print('\n', len(CamerasRemoved), 'cameras removed:', CamerasRemoved)
+
+^ may get rid of this if it is deleting objects
+'''  
+      
+# GlitchPieces(Piece, Centre, Spin, Dims)
+# spread along x at height z widen positions using Fib
+# then first timed move is to spread 'B221' along y and 'S111' further up z
+# while B321 drift in along x
+
+print('Object list:  ', end = ' ')
+for Ob in D.objects:
+    print(Ob.name, end = ' ')
+
+CubeD = mD * BScale    # this appears too late, 
+Matrix3D = [[['.' for mx in range(mD)] for my in range(mD)] for mz in range(mD)]
+print('mx, my, mz, mD values: ', mx, my, mz, mD)
+print('Matrix3D: \n', Matrix3D)
+
+
+CollectedItems = []
+print('List of bpy.data.collections:', list(bpy.data.collections))      
+
+
+'''
+From lh console :-
+>>> bpy.context.view_layer
+bpy.data.scenes['Scene'].view_layers['View Layer']
+'''
+
+# from https://b3d.interplanety.org/en/how-to-create-camera-through-the-blender-python-api/
+# ActiveItems = [PuzzlePieces, Camera, LightA, LightB]  # ?  
+# radians for resting, final rotation axes:  0, 0, 0;   0, Pi/2, Pi/2;   Pi/2, 0, Pi/2
+
+
+
+''' Start animation! '''
+
+'''
+#TrackT = D.objects['Cube']
+#TrackT.location = (300, 0, 160)
+CamCheck = [ob for ob in bpy.context.scene.objects if ob.type == 'CAMERA']
+#  CamCheck returns  [D.objects['SpinCamera']], CamCheck[0] = D.objects['SpinCamera'], 
+if len(CamCheck) == 0:
+    bpy.ops.object.camera_add(location = (10, 20, 30))
+    Camera = C.active_object
+    D.objects['Camera'] = C.scene.camera  # the camera is there but there is nothing to track 
+'''
+
+# Removing camera(s) from scene then adding and renaming 'SpinCamera' = D.objects['Camera']
+# https://blender.stackexchange.com/questions/151319/adding-camera-to-scene
+CamList = [ob for ob in list(C.scene.objects) if ob.type == 'CAMERA']
+if len(CamList) > 0:
+    for Cam in CamList:
+        D.objects.remove(Cam, do_unlink = True)
+
+bpy.ops.object.camera_add(location = (10, 20,30))
+SpinCamera = D.objects['Camera']
+
+TrackT = D.objects['B221dv']  # latest error occurs because scene only contains 'moon'
+
+TrackingConstraints = SpinCamera.constraints.new(type = 'TRACK_TO')   
+# was SpinCamera.constraints...
+TrackingConstraints.target = TrackT
+TrackingConstraints.track_axis = 'TRACK_NEGATIVE_Z'
+TrackingConstraints.up_axis = 'UP_Y'
+
+for ADA in AngleDict628:
+    SpinCamera.location.x = int(90 * AngleDict628[ADA][0])            # [.][0]) is sin, [.][1] is cos
+    SpinCamera.location.y = int(90 * AngleDict628[ADA][1])            # all multipliers were x30
+    SpinCamera.location.z = 320 + int(150 * AngleDict628[ADA][1])     # was 150 + int(...
+    FlyFrame = int(ADA * 5 + 10)
+    TrackT.keyframe_insert(data_path = 'location', frame = FlyFrame * 6)
+    # print updated SpinCamera locations
+    '''if FlyFrame % 20 == 0:
+        print('SpinCamera loc x, y, z:', \
+            SpinCamera.location.x, SpinCamera.location.y, SpinCamera.location.z)
+            # 'angle is 90* or 150* value of FlyFrame:', FlyFrame)'''
+
+FlyFrame += 50
+C.scene.frame_set(FlyFrame)
+    # no motion by TrackT, B321az such as  B321az.location.z -= 3
+    # TrackT.keyframe_insert(data_path = 'location', frame = FlyFrame * )
+
+print('Got to line 410')
+    
+
+# print('Line 125 TestCubeA z value is', TestCubeA.location.z)
+
+# spheres appear, one of these will be tracked by Camera
+
+
+# Set the target object add a track-to constraint to the camera
+#target = bpy.data.objects['B321az']   
+#track_constraint = Camera.constraints.new(type='TRACK_TO')
+#track_constraint.target = target
+#track_constraint.track_axis = 'TRACK_NEGATIVE_Z'
+#track_constraint.up_axis = 'UP_Y'
+
+'''
+# Set the initial location of the camera
+# similar to an aeroplane circling with lens trained on the ground 
+for a in AngleDict628:
+    FlyFrame = a
+    Camera.location.x = int(90 * AngleDict628[a][0])  # [a][0]) is sin, [a][1] is cos
+    Camera.location.y = int(90 * AngleDict628[a][1])  # all multiliers were x30
+    Camera.location.z = 220 + int(150 * AngleDict628[a][1])  # was 150 + int(...
+    # TestCubeA CofG is at the lunar surface at frame 72
+    Camera.keyframe_insert(data_path = "location", frame = FlyFrame)
+    if a % 20 == 0:
+        # print('Camera location x, y, z:', Camera.location.x, Camera.location.y, Camera.location.z, 'angle:', a, 'FlyFrame:', FlyFrame)
+        TestCubeA.location.z -= 3  # was -= 4
+        TestCubeA.keyframe_insert(data_path = "location", frame = FlyFrame)
+        # print('Line 302 TestCubeA location x, y, z:', TestCubeA.location.x, TestCubeA.location.y, TestCubeA.location.z)
+
+    
+Camera.keyframe_insert(data_path = "location", frame = FlyFrame + 32) # remove?
+bpy.context.scene.frame_set(FlyFrame)
+print('Final FlyFrame value is', FlyFrame)
+bpy.ops.screen.animation_cancel(restore_frame = False)
+target.select_set(False)   # Ensure the target object is not accidentally moved
+
+
+print('Final x, y, z location:', TestCubeA.location.x, TestCubeA.location.y, TestCubeA.location.z)
+'''
+# stop rendering at 628 frames '''
+
+# basic motion
+''' start ->
+Frame = 1
+
+# the keyframe line is what was missing before
+ItemName = 'B321av'
+ItemInfo = bpy.data.objects[ItemName]
+bpy.context.scene.frame_set(Frame)
+ItemInfo.keyframe_insert(data_path = "location",index = -1)
+print('ItemInfo before move:', ItemInfo.location)
+
+
+Frame = 120
+
+#ItemInfo = bpy.data.objects(ItemName)
+bpy.context.scene.frame_set(Frame)
+ItemInfo.location = (-3, 0, 100)
+ItemInfo.keyframe_insert(data_path = "location",index = -1)
+print('ItemInfo after move:', ItemInfo.location)
+    <- and stop '''
+'''
+# film from exploratory drone
+# glitch
+# film drone filming glitching blocks
+ 
+# is this clean up necessary? 
+# clear scene of script item debris 
+for o in bpy.data.objects:
+    print('Object:', o)
+    for i in ActiveItems:
+        try:
+            if o.name[:4] == i[:4]:
+                print('Deleting', o.name)
+                o.user_clear
+                bpy.data.objects.remove(o)
+        except ReferenceError as e:
+            print(e)
+
+            
+# matrix operations to aid solving with Python later
+def RotateBlocksAboutSpheres(BCoords, BDims, NameRootAppend):
+    print('fn RotateBlocksAboutSpheres BCoords, BDims, NameRootAppend:  ', BCoords, BDims, NameRootAppend)
+    bpy.ops.mesh.primitive_cube_add(location = (BCoords[0], BCoords[1], BCoords[2]), rotation = (0, 0, 0), scale = (BDims))
+    FullBlockName = AssignNameMaterial(NameRootAppend)
+    bpy.ops.mesh.primitive_cube_add(location = (BCoords[1], BCoords[2], BCoords[0]), rotation = (0, Pi/2, Pi/2), scale = (BDims))
+    FullBlockName = AssignNameMaterial(NameRootAppend)
+    bpy.ops.mesh.primitive_cube_add(location = (BCoords[2], BCoords[0], BCoords[1]), rotation = (Pi/2, 0, Pi/2), scale = (BDims))
+    FullBlockName = AssignNameMaterial(NameRootAppend)
+    bpy.ops.mesh.primitive_cube_add(location = (CubeD-BCoords[0], CubeD-BCoords[1], CubeD-BCoords[2]), rotation = (0, 0, 0), scale = (BDims))
+    FullBlockName = AssignNameMaterial(NameRootAppend)
+    bpy.ops.mesh.primitive_cube_add(location = (CubeD-BCoords[1], CubeD-BCoords[2], CubeD-BCoords[0]), rotation = (0, Pi/2, Pi/2), scale = (BDims))
+    FullBlockName = AssignNameMaterial(NameRootAppend)
+    bpy.ops.mesh.primitive_cube_add(location = (CubeD-BCoords[2], CubeD-BCoords[0], CubeD-BCoords[1]), rotation = (Pi/2, 0, Pi/2), scale = (BDims))
+    FullBlockName = AssignNameMaterial(NameRootAppend)
+    print('used RotateBlocksAboutSpheres with matrix size', mD)
+    # link the rotations here with the matrix:  (0, Pi/2, Pi/2) for 'b' <->   np.rot90(..., axes = (0, 2)); np.rot90(..., axes = (1, 0))
+    # (Pi/2, 0, Pi/2) for 'c' <-> np.rot90(..., axes = (0, 1)); np.rot90(..., axes = (2, 0)) in fn RotateReflectMatrix
+    # and BDims aka NewBlockXYZ 
+
+# more matrix operations to aid solving with Python later
+def CheckEmptiesForBlock(CornerCell):
+    print('CornerCell occupies matrix position:',  CornerCell)
+    EmptySpace = True
+    StillChecking = True
+    
+    while EmptySpace and StillChecking:
+        for CellX in range(CornerCell[0], CornerCell[0] + MBlockXYZ[0], 1):   # syntax is  range(FromValue, ToValue, StepSize)
+            for CellY in range(CornerCell[1], CornerCell[1] + MBlockXYZ[1], 1):
+                for CellZ in range(CornerCell[2], CornerCell[2] + MBlockXYZ[2], 1):
+                    print('EmptySpace: ', EmptySpace, '   cell (x, y, z): ', CellX, CellY, CellZ)
+                    print('Matrix3D[CellX][CellY][CellZ] holds: ', Matrix3D[CellX][CellY][CellZ])
+                    if Matrix3D[CellX][CellY][CellZ] != '.':
+                        EmptySpace = False
+                    else:
+                        Matrix3D[CellX][CellY][CellZ] = EachBlock + 'a'
+                        # EmptySpace = True
+
+        print('3D \'for\' loops in matrix finished')
+        StillChecking = False
+        # call fn to fill in cells with 'B-321' suffix 'b', 'c' etc on a different 3D matrix
+        # see if matrices can be added, updating Matrix3D as we go
+                 
+    print('EmptySpace is', str(EmptySpace), ', StillChecking is', str(StillChecking), 'after checking block\'s cells.')
+    BlockCofMList = [ CornerCell[0] + MBlockXYZ[0]/2, CornerCell[1] + MBlockXYZ[1]/2, CornerCell[2] + MBlockXYZ[2]/2 ]
+    print('CornerCell XYZ positions:',  CornerCell)
+    NewBlockXYZ = [MBlockXYZ[0]*0.01, MBlockXYZ[1]*0.01, MBlockXYZ[2]*0.01]
+    print('NewBlockXYZ C of M position:', BlockCofMList)
+    return(EmptySpace, BlockCofMList, NewBlockXYZ)
+
+# yet more matrix operations to aid solving with Python later
+def RotateReflectMatrix(MatrixA):
+    for shape in BlockRoots:
+        semiMatrixB = np.rot90(MatrixA, axes = (0, 2))   # rotates B321a (flat along x-axis) to B321b (vertical, z)
+        MatrixB = np.rot90(semiMatrixB, axes = (1, 0))
+        for mx in range(mD):
+            for my in range(mD):
+                for mz in range(mD):
+                    if MatrixB[mx][my][mz][0:4] == shape:
+                        MatrixB[mx][my][mz] = shape + 'b'
+                         
+        semiMatrixC = np.rot90(MatrixA, axes = (0, 1))   # rotates B321a (as above) to B321c (set on edge, aligned along y)
+        MatrixC = np.rot90(semiMatrixC, axes = (2, 0))
+        for mx in range(mD):
+            for my in range(mD):
+                for mz in range(mD):
+                    if MatrixC[mx][my][mz][0:4] == shape:
+                        MatrixC[mx][my][mz] = shape + 'c'
+    
+    FinalMatrix = FormerMatrix
+    rD = mD - 1       # range dimension, rD, is one less than mD, matrix dimension
+    for mx in range(mD):
+        for my in range(mD):
+            for mz in range(mD):
+                if FormerMatrix[mx][my][mz][:1] == 'S':
+                    FinalMatrix[mx][my][mz] = FormerMatrix[mx][my][mz]
+                if MatrixA[mx][my][mz][:4] in BlockRoots:
+                    FinalMatrix[mx][my][mz] = MatrixA[mx][my][mz]
+                    FinalMatrix[rD - mx][rD - my][rD - mz] = MatrixA[mx][my][mz][:5] + 'd'
+                if MatrixB[mx][my][mz][:4] in BlockRoots:
+                    FinalMatrix[mx][my][mz] = MatrixB[mx][my][mz]
+                    FinalMatrix[rD - mx][rD - my][rD - mz] = MatrixB[mx][my][mz][:5] + 'e'
+                if MatrixC[mx][my][mz][:4] in BlockRoots:
+                    FinalMatrix[mx][my][mz] = MatrixC[mx][my][mz]
+                    FinalMatrix[rD - mx][rD - my][rD - mz] = MatrixC[mx][my][mz][:5] + 'f'                    
+
+    print('FinalMatrix is', FinalMatrix)
+
+
+def GlitchSpheres(SName, StartPos, GSRadius):      # MakePiece is one key 
+    bpy.ops.mesh.primitive_uv_sphere_add(segments = 128, ring_count = 32, radius = GSRadius, \
+        calc_uvs = True, location = (StartPos[0], StartPos[1], StartPos[2]) )
+    C.object.name = SName     
+    if ObjName[5:] == 'v':                              # this is S111[abcd]v, steel material
+        D.objects[ObjName].active_material = SphereSteel
+    else:
+        D.objects[ObjName].active_material = BlockAcrylic   # most spheres are BlockAcrylic
+         
+def GlitchBlocks(BName, StartPos, GBRot, GBDim):             
+    bpy.ops.mesh.primitive_cube_add( location = (StartPos[0], StartPos[1], StartPos[2]), \
+        rotation = (GBRot[0], GBRot[1], GBRot[2]), scale = (GBDim[0], GBDim[1], GBDim[2]) )
+    C.object.name = BName
+    D.objects[ObjName].active_material = BlockAcrylic
+
+ObLights = ['LightA', 'LightB']    # prepare to check and clean objects in other collections    
+for o in D.collections:
+    print(o)
+
+for o in D.objects:
+    if o.name in ObLights:
+        print(o.name, 'found')  
+        
+#### From Claude.ai regarding collections #### 
+import bpy
+
+# Name of the collection we want to create/use
+collection_name = "CoLightsCamera"
+
+# Check if the collection already exists
+if collection_name not in bpy.data.collections:
+    # Create a new collection
+    new_collection = bpy.data.collections.new(collection_name)
+    # Link the new collection to the scene
+    bpy.context.scene.collection.children.link(new_collection)
+    print(f"Created new collection: {collection_name}")
+else:
+    # Use the existing collection
+    new_collection = bpy.data.collections[collection_name]
+    print(f"Using existing collection: {collection_name}")
+
+# Objects to add to the collection
+object_names = ["LightA", "LightB", "camera"]
+
+# Add objects to the collection
+for obj_name in object_names:
+    if obj_name in bpy.data.objects:
+        obj = bpy.data.objects[obj_name]
+        
+        # Check if the object is already in the collection
+        if obj.name not in new_collection.objects:
+            # Link the object to the collection
+            new_collection.objects.link(obj)
+            print(f"Added {obj_name} to {collection_name}")
+        else:
+            print(f"{obj_name} is already in {collection_name}")
+    else:
+        print(f"Warning: Object {obj_name} not found in the scene")
+
+print("Finished adding objects to collection")           
+'''
